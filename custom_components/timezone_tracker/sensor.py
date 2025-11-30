@@ -18,6 +18,7 @@ from .const import (
     DOMAIN,
     ATTR_EDGE_DISTANCE,
     ATTR_HEADING_DISTANCE,
+    ATTR_NEAREST_TIMEZONE,
     ATTR_DETECTED_TIMEZONE,
     ATTR_PENDING_CHANGE,
     ATTR_PENDING_COUNT,
@@ -123,6 +124,8 @@ class TimezoneBoundaryDistanceSensor(TimezoneTrackerSensorBase):
             attrs[ATTR_EDGE_DISTANCE] = round(data.edge_distance, 1)
         if data.heading_distance < 9999:
             attrs[ATTR_HEADING_DISTANCE] = round(data.heading_distance, 1)
+        if data.nearest_other_timezone:
+            attrs[ATTR_NEAREST_TIMEZONE] = data.nearest_other_timezone
 
         return attrs
 

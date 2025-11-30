@@ -86,6 +86,7 @@ SPEED_FAST = 65
 # Sensor attributes
 ATTR_EDGE_DISTANCE = "edge_distance"
 ATTR_HEADING_DISTANCE = "heading_distance"
+ATTR_NEAREST_TIMEZONE = "nearest_timezone"
 ATTR_DETECTED_TIMEZONE = "detected_timezone"
 ATTR_PENDING_CHANGE = "pending_change"
 ATTR_PENDING_COUNT = "pending_count"

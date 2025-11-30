@@ -55,6 +55,7 @@ class TimezoneData:
     
     current_timezone: str | None = None
     detected_timezone: str | None = None
+    nearest_other_timezone: str | None = None
     edge_distance: float = float('inf')
     heading_distance: float = float('inf')
     effective_distance: float = float('inf')
@@ -302,9 +303,11 @@ class TimezoneTrackerCoordinator:
         self.data.detected_timezone = detected_tz
 
         # Calculate distances
-        edge_distance = await self.hass.async_add_executor_job(
+        edge_distance, nearest_tz = await self.hass.async_add_executor_job(
             self._calculate_distance_to_boundary, lat, lon, detected_tz
         )
+        
+        self.data.nearest_other_timezone = nearest_tz
         
         if speed > SPEED_STOPPED:
             heading_distance = await self.hass.async_add_executor_job(
@@ -410,32 +413,61 @@ class TimezoneTrackerCoordinator:
 
         return nearest_tz
 
-    def _calculate_distance_to_boundary(self, lat: float, lon: float, tz_id: str) -> float:
-        """Calculate distance from point to nearest edge of timezone polygon."""
+    def _calculate_distance_to_boundary(self, lat: float, lon: float, tz_id: str) -> tuple[float, str | None]:
+        """
+        Calculate distance from point to nearest timezone boundary that leads to a different timezone.
+        
+        Ignores coastal boundaries (edges where the other side is ocean/no timezone).
+        
+        Returns: (distance_in_miles, nearest_timezone_id)
+        """
         if not self._tz_polygons or tz_id not in self._tz_polygons:
-            return float('inf')
+            return float('inf'), None
 
         point = Point(lon, lat)
-        polygon = self._tz_polygons[tz_id]
 
         try:
-            boundary = polygon.boundary
-            nearest_pt = nearest_points(point, boundary)[1]
-
-            if self._geod:
-                _, _, dist_meters = self._geod.inv(lon, lat, nearest_pt.x, nearest_pt.y)
-                return dist_meters / 1609.344
-            else:
-                return self._haversine_distance(lat, lon, nearest_pt.y, nearest_pt.x)
+            # Find distances to all other timezone polygons
+            # The nearest one that's different from current is the real boundary
+            min_distance = float('inf')
+            nearest_tz = None
+            
+            for other_tz_id, other_polygon in self._tz_polygons.items():
+                if other_tz_id == tz_id:
+                    continue
+                
+                try:
+                    # Get distance from current point to the other timezone's polygon
+                    nearest_pt = nearest_points(point, other_polygon)[1]
+                    
+                    if self._geod:
+                        _, _, dist_meters = self._geod.inv(lon, lat, nearest_pt.x, nearest_pt.y)
+                        dist_miles = dist_meters / 1609.344
+                    else:
+                        dist_miles = self._haversine_distance(lat, lon, nearest_pt.y, nearest_pt.x)
+                    
+                    if dist_miles < min_distance:
+                        min_distance = dist_miles
+                        nearest_tz = other_tz_id
+                        
+                except Exception:
+                    continue
+            
+            return min_distance, nearest_tz
 
         except Exception as e:
             _LOGGER.warning(f"Error calculating distance: {e}")
-            return float('inf')
+            return float('inf'), None
 
     def _calculate_distance_along_heading(
         self, lat: float, lon: float, heading: float, tz_id: str, max_distance: float = 200
     ) -> float:
-        """Calculate distance to timezone boundary along current heading."""
+        """
+        Calculate distance to timezone boundary along current heading.
+        
+        Only returns a distance if crossing would lead to a different timezone,
+        not if it would lead to ocean/no timezone.
+        """
         if not self._tz_polygons or tz_id not in self._tz_polygons:
             return float('inf')
 
@@ -447,17 +479,25 @@ class TimezoneTrackerCoordinator:
                     break
 
                 new_lat, new_lon = self._project_point(lat, lon, heading, dist)
-                if not polygon.contains(Point(new_lon, new_lat)):
-                    # Binary search for precise crossing
-                    low, high = 0, dist
-                    for _ in range(10):
-                        mid = (low + high) / 2
-                        mid_lat, mid_lon = self._project_point(lat, lon, heading, mid)
-                        if polygon.contains(Point(mid_lon, mid_lat)):
-                            low = mid
-                        else:
-                            high = mid
-                    return (low + high) / 2
+                test_point = Point(new_lon, new_lat)
+                
+                if not polygon.contains(test_point):
+                    # We've left our current timezone - check what's on the other side
+                    other_tz = self._find_timezone_at_point(new_lat, new_lon)
+                    
+                    if other_tz is not None and other_tz != tz_id:
+                        # There's a different timezone here - this is a real boundary
+                        # Binary search for precise crossing
+                        low, high = 0, dist
+                        for _ in range(10):
+                            mid = (low + high) / 2
+                            mid_lat, mid_lon = self._project_point(lat, lon, heading, mid)
+                            if polygon.contains(Point(mid_lon, mid_lat)):
+                                low = mid
+                            else:
+                                high = mid
+                        return (low + high) / 2
+                    # else: it's ocean or same timezone (multipolygon gap) - keep looking
 
             return max_distance
 
