@@ -1,0 +1,51 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Timezone Tracker",
+        "description": "Select your GPS device tracker entity and the region to download timezone boundaries for.",
+        "data": {
+          "gps_entity": "GPS Device Tracker Entity",
+          "region_filter": "Region (affects download size and memory usage)"
+        }
+      }
+    },
+    "error": {
+      "entity_not_found": "GPS entity not found",
+      "no_gps_attributes": "Entity does not have GPS coordinates (latitude/longitude)",
+      "download_failed": "Failed to download timezone boundary data"
+    },
+    "abort": {
+      "already_configured": "This GPS entity is already configured",
+      "no_device_trackers": "No device tracker entities with GPS coordinates found"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Timezone Tracker Options",
+        "description": "Adjust region, polling intervals, and hysteresis settings. Changing the region will delete the cached data and trigger a re-download.",
+        "data": {
+          "region_filter": "Region (changing this will re-download data)",
+          "min_interval": "Minimum check interval (seconds)",
+          "max_interval": "Maximum check interval (seconds)",
+          "hysteresis_count": "Readings required before timezone change"
+        }
+      }
+    }
+  },
+  "services": {
+    "force_update": {
+      "name": "Force Update",
+      "description": "Force an immediate timezone check."
+    },
+    "reload_data": {
+      "name": "Reload Data",
+      "description": "Reload timezone boundary data from the cached file."
+    },
+    "download_data": {
+      "name": "Download Data",
+      "description": "Delete cached data and re-download timezone boundaries from the internet."
+    }
+  }
+}

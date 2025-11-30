@@ -1,0 +1,12 @@
+{
+  "domain": "timezone_tracker",
+  "name": "Timezone Tracker",
+  "codeowners": ["@yourusername"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/yourusername/hass-timezone-tracker",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/yourusername/hass-timezone-tracker/issues",
+  "requirements": ["shapely>=2.0.0", "pyproj>=3.0.0"],
+  "version": "1.0.0"
+}

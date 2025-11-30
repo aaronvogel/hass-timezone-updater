@@ -1,0 +1,11 @@
+force_update:
+  name: Force Update
+  description: Force an immediate timezone check, ignoring the scheduled interval.
+
+reload_data:
+  name: Reload Data
+  description: Reload timezone boundary data from the cached GeoJSON file.
+
+download_data:
+  name: Download Data
+  description: Delete cached data and re-download timezone boundaries from the internet. Uses the region filter configured in the integration options.
