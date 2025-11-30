@@ -8,6 +8,7 @@ A Home Assistant custom component that tracks your location relative to timezone
 
 - **100% Local**: Uses locally stored timezone boundary polygons - no API calls for timezone lookups
 - **Accurate Boundaries**: Real timezone boundaries from OpenStreetMap, not simplified longitude lines
+- **Smart Boundary Detection**: Only considers boundaries between actual timezones, ignoring coastal edges and ocean boundaries
 - **Adaptive Polling**: Checks frequently when near a boundary, infrequently when far away
 - **Heading-Aware**: Calculates distance along your direction of travel
 - **Hysteresis**: Prevents timezone flip-flopping due to GPS jitter at boundaries
@@ -16,14 +17,24 @@ A Home Assistant custom component that tracks your location relative to timezone
 ## How It Works
 
 ```
-GPS Update → Local Polygon Lookup → Distance Calculation → Adaptive Interval → Auto-Update HA Timezone
+GPS Update → Local Polygon Lookup → Distance to Adjacent Timezone → Adaptive Interval → Auto-Update HA Timezone
 ```
 
 1. Reads your GPS coordinates from a device tracker entity
 2. Performs point-in-polygon lookup against locally stored timezone boundaries
-3. Calculates distance to the nearest boundary edge (and along your heading)
-4. Sets polling interval based on distance and speed
-5. Updates Home Assistant's timezone when you cross a boundary
+3. Calculates distance to the nearest *adjacent timezone* (not coastal/ocean edges)
+4. Also calculates distance along your heading to the next timezone
+5. Sets polling interval based on distance and speed
+6. Updates Home Assistant's timezone when you cross a boundary
+
+### Smart Boundary Detection
+
+The integration intelligently ignores boundaries that don't lead to a different timezone. For example:
+
+- If you're in California (Pacific time), it measures distance to the Mountain timezone boundary to the east, **not** the edge of the Pacific timezone polygon in the ocean
+- When calculating distance along your heading, it only reports a boundary if crossing it would put you in a different timezone
+
+This ensures you get accurate, meaningful distance readings regardless of your proximity to coastlines or other non-timezone boundaries.
 
 ## Installation
 
@@ -93,12 +104,13 @@ The integration creates three sensors:
 ### Boundary Distance (`sensor.timezone_tracker_boundary_distance`)
 - **State**: Distance to nearest timezone boundary in miles
 - **Attributes**:
-  - `edge_distance`: Straight-line distance to nearest boundary
-  - `heading_distance`: Distance along current heading to boundary
+  - `edge_distance`: Straight-line distance to nearest adjacent timezone
+  - `heading_distance`: Distance along current heading to next timezone
+  - `nearest_timezone`: The timezone that is nearest to your current location (e.g., `America/Denver`)
   - `latitude`, `longitude`, `heading`, `speed`: Current GPS state
 
 ### Current Timezone (`sensor.timezone_tracker_current_timezone`)
-- **State**: Current timezone (e.g., `America/Denver`)
+- **State**: Current timezone (e.g., `America/Los_Angeles`)
 - **Attributes**:
   - `detected_timezone`: What the boundary data shows
   - `pending_change`: Timezone waiting for confirmation (if any)
@@ -144,6 +156,8 @@ entities:
     name: Current Timezone
   - entity: sensor.timezone_tracker_boundary_distance
     name: Distance to Boundary
+    secondary_info: attribute
+    attribute: nearest_timezone
   - entity: sensor.timezone_tracker_check_interval
     name: Check Interval
     secondary_info: attribute
