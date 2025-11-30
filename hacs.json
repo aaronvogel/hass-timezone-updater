@@ -1,7 +1,4 @@
 {
   "name": "Timezone Tracker",
-  "homeassistant": "2024.1.0",
-  "render_readme": true,
-  "zip_release": true,
-  "filename": "timezone_tracker.zip"
+  "render_readme": true
 }
