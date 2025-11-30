@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import voluptuous as vol
@@ -14,17 +15,17 @@ from homeassistant.helpers import selector
 from .const import (
     DOMAIN,
     CONF_GPS_ENTITY,
-    CONF_TIMEZONE_DATA_PATH,
     CONF_MIN_INTERVAL,
     CONF_MAX_INTERVAL,
     CONF_HYSTERESIS_COUNT,
     CONF_REGION_FILTER,
-    DEFAULT_TIMEZONE_DATA_PATH,
     DEFAULT_MIN_INTERVAL,
     DEFAULT_MAX_INTERVAL,
     DEFAULT_HYSTERESIS_COUNT,
     DEFAULT_REGION_FILTER,
     REGION_FILTERS,
+    STORAGE_DIR,
+    STORAGE_FILENAME,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -74,7 +75,6 @@ class TimezoneTrackerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     title=f"Timezone Tracker ({gps_entity})",
                     data={
                         CONF_GPS_ENTITY: gps_entity,
-                        CONF_TIMEZONE_DATA_PATH: DEFAULT_TIMEZONE_DATA_PATH,
                         CONF_REGION_FILTER: region_filter,
                     },
                 )
@@ -146,13 +146,10 @@ class TimezoneTrackerOptionsFlow(config_entries.OptionsFlow):
                     data=new_data,
                 )
                 
-                # Delete existing timezone data file to force re-download
-                timezone_data_path = self.config_entry.data.get(
-                    CONF_TIMEZONE_DATA_PATH, DEFAULT_TIMEZONE_DATA_PATH
-                )
+                # Delete existing timezone data file
+                timezone_data_path = self.hass.config.path(".storage", STORAGE_DIR, STORAGE_FILENAME)
                 
                 def delete_data_file():
-                    import os
                     if os.path.exists(timezone_data_path):
                         os.remove(timezone_data_path)
                         return True
@@ -161,6 +158,24 @@ class TimezoneTrackerOptionsFlow(config_entries.OptionsFlow):
                 deleted = await self.hass.async_add_executor_job(delete_data_file)
                 if deleted:
                     _LOGGER.info(f"Deleted timezone data file for re-download with new region: {new_region}")
+                
+                # Trigger immediate re-download in background via coordinator
+                # The coordinator will see the file is missing and download it
+                coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
+                if coordinator:
+                    async def reload_data_background():
+                        """Reload data in background task."""
+                        try:
+                            _LOGGER.info(f"Starting background download for region: {new_region}")
+                            # Update coordinator's region filter
+                            coordinator.region_filter = new_region
+                            await coordinator.async_load_timezone_data()
+                            _LOGGER.info(f"Background download complete for region: {new_region}")
+                        except Exception as e:
+                            _LOGGER.error(f"Background download failed: {e}")
+                    
+                    # Fire and forget - don't await
+                    self.hass.async_create_task(reload_data_background())
             
             # Save options (excluding region_filter which goes in data)
             options_to_save = {

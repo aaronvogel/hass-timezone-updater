@@ -4,27 +4,29 @@ DOMAIN = "timezone_tracker"
 
 # Configuration
 CONF_GPS_ENTITY = "gps_entity"
-CONF_TIMEZONE_DATA_PATH = "timezone_data_path"
 CONF_MIN_INTERVAL = "min_interval"
 CONF_MAX_INTERVAL = "max_interval"
 CONF_HYSTERESIS_COUNT = "hysteresis_count"
 CONF_REGION_FILTER = "region_filter"
 
+# Storage - relative to .storage directory (not in /config to avoid backup bloat)
+STORAGE_DIR = "timezone_tracker"
+STORAGE_FILENAME = "timezones.geojson"
+
 # Defaults
-DEFAULT_TIMEZONE_DATA_PATH = "/config/timezone_data/timezones.geojson"
 DEFAULT_MIN_INTERVAL = 30  # seconds
 DEFAULT_MAX_INTERVAL = 3600  # 1 hour
 DEFAULT_HYSTERESIS_COUNT = 2  # consecutive readings required
-DEFAULT_REGION_FILTER = "all"
+DEFAULT_REGION_FILTER = "north_america"  # Sensible default for most users
 
-# Region filter options
+# Region filter options (ordered by size, smallest first for better UX)
 REGION_FILTERS = {
-    "all": "All Timezones (~120MB)",
-    "north_america": "North America - US, Canada, Mexico (~8MB)",
-    "us": "United States only (~3MB)",
-    "us_canada": "US & Canada (~6MB)",
-    "europe": "Europe (~5MB)",
-    "americas": "All Americas (~15MB)",
+    "us": "United States only (~3MB, ~50MB RAM)",
+    "europe": "Europe (~5MB, ~80MB RAM)",
+    "us_canada": "US & Canada (~6MB, ~90MB RAM)",
+    "north_america": "North America - US, Canada, Mexico (~8MB, ~100MB RAM)",
+    "americas": "All Americas (~15MB, ~150MB RAM)",
+    "all": "⚠️ All Timezones (~120MB, ~500MB+ RAM - not for Pi)",
 }
 
 # Timezone prefixes for each region

@@ -32,21 +32,18 @@ _LOGGER = logging.getLogger(__name__)
 # URL for timezone boundary data
 TIMEZONE_DATA_URL = "https://github.com/evansiroky/timezone-boundary-builder/releases/latest/download/timezones-now.geojson.zip"
 
-# Try to import shapely and pyproj
+# Earth's radius in miles (for Haversine calculations)
+EARTH_RADIUS_MILES = 3958.8
+
+# Try to import shapely
 try:
     from shapely.geometry import Point, shape
     from shapely.ops import nearest_points
+    from shapely import STRtree
     SHAPELY_AVAILABLE = True
 except ImportError:
     SHAPELY_AVAILABLE = False
     _LOGGER.error("shapely not installed. Run: pip install shapely")
-
-try:
-    from pyproj import Geod
-    PYPROJ_AVAILABLE = True
-except ImportError:
-    PYPROJ_AVAILABLE = False
-    _LOGGER.warning("pyproj not installed. Distance calculations will be approximate.")
 
 
 @dataclass
@@ -92,7 +89,8 @@ class TimezoneTrackerCoordinator:
         self.hysteresis_count = hysteresis_count
 
         self._tz_polygons: dict[str, Any] = {}
-        self._geod = Geod(ellps='WGS84') if PYPROJ_AVAILABLE else None
+        self._tz_index: list[str] = []  # Maps STRtree index to timezone ID
+        self._spatial_tree: STRtree | None = None  # R-tree spatial index
         self._cancel_scheduled: asyncio.TimerHandle | None = None
         self._running = False
         self._listeners: list[callable] = []
@@ -114,44 +112,107 @@ class TimezoneTrackerCoordinator:
             listener()
 
     async def _async_download_timezone_data(self) -> bool:
-        """Download timezone boundary data from GitHub."""
+        """Download timezone boundary data from GitHub with memory-efficient streaming."""
         try:
             # Ensure directory exists
             data_dir = os.path.dirname(self.timezone_data_path)
             os.makedirs(data_dir, exist_ok=True)
+            
+            zip_path = os.path.join(data_dir, "timezones_download.zip")
 
             _LOGGER.info(f"Downloading timezone data from {TIMEZONE_DATA_URL}")
             
             session = async_get_clientsession(self.hass)
             
+            # Stream download to disk instead of loading into RAM
             async with session.get(TIMEZONE_DATA_URL) as response:
                 if response.status != 200:
                     _LOGGER.error(f"Failed to download timezone data: HTTP {response.status}")
                     return False
                 
-                zip_data = await response.read()
-                _LOGGER.info(f"Downloaded {len(zip_data) / 1024 / 1024:.1f} MB")
+                total_size = 0
+                with open(zip_path, 'wb') as f:
+                    async for chunk in response.content.iter_chunked(8192):
+                        f.write(chunk)
+                        total_size += len(chunk)
+                
+                _LOGGER.info(f"Downloaded {total_size / 1024 / 1024:.1f} MB to disk")
 
             # Get filter prefixes for selected region
             filter_prefixes = REGION_TIMEZONE_PREFIXES.get(self.region_filter)
 
             # Extract and filter in executor to avoid blocking
             def extract_filter_and_save():
-                with zipfile.ZipFile(BytesIO(zip_data), 'r') as zf:
+                feature_count = 0
+                
+                with zipfile.ZipFile(zip_path, 'r') as zf:
                     # Find the geojson file
                     geojson_files = [f for f in zf.namelist() if f.endswith('.geojson') or f.endswith('.json')]
                     if not geojson_files:
                         raise ValueError("No GeoJSON file found in zip archive")
                     
                     geojson_name = geojson_files[0]
-                    _LOGGER.info(f"Extracting {geojson_name}")
+                    _LOGGER.info(f"Processing {geojson_name}")
                     
-                    with zf.open(geojson_name) as f:
+                    # Extract to temp file for streaming parse
+                    extracted_path = os.path.join(data_dir, "timezones_temp.geojson")
+                    with zf.open(geojson_name) as src, open(extracted_path, 'wb') as dst:
+                        # Stream extraction in chunks
+                        while True:
+                            chunk = src.read(65536)
+                            if not chunk:
+                                break
+                            dst.write(chunk)
+                
+                # Now process the extracted file with streaming JSON if available
+                extracted_path = os.path.join(data_dir, "timezones_temp.geojson")
+                
+                try:
+                    # Try to use ijson for memory-efficient parsing
+                    import ijson
+                    _LOGGER.debug("Using ijson for memory-efficient parsing")
+                    
+                    filtered_features = []
+                    original_count = 0
+                    
+                    with open(extracted_path, 'rb') as f:
+                        for feature in ijson.items(f, 'features.item'):
+                            original_count += 1
+                            tz_id = feature.get('properties', {}).get('tzid', '')
+                            
+                            # Apply filter
+                            if filter_prefixes is None:
+                                # No filter - include all
+                                filtered_features.append(feature)
+                            else:
+                                for prefix in filter_prefixes:
+                                    if prefix.endswith('/'):
+                                        if tz_id.startswith(prefix):
+                                            filtered_features.append(feature)
+                                            break
+                                    else:
+                                        if tz_id == prefix or tz_id.startswith(prefix + '/'):
+                                            filtered_features.append(feature)
+                                            break
+                    
+                    if filter_prefixes is not None:
+                        _LOGGER.info(f"Filtered timezones: {original_count} -> {len(filtered_features)} (region: {self.region_filter})")
+                    
+                    # Write filtered output
+                    with open(self.timezone_data_path, 'w') as f:
+                        json.dump({"type": "FeatureCollection", "features": filtered_features}, f)
+                    
+                    feature_count = len(filtered_features)
+                    
+                except ImportError:
+                    # Fallback to standard json if ijson not available
+                    _LOGGER.debug("ijson not available, using standard JSON parsing")
+                    
+                    with open(extracted_path, 'r') as f:
                         data = json.load(f)
                     
                     original_count = len(data.get('features', []))
                     
-                    # Apply region filter if specified
                     if filter_prefixes is not None:
                         filtered_features = []
                         for feature in data.get('features', []):
@@ -159,12 +220,10 @@ class TimezoneTrackerCoordinator:
                             
                             for prefix in filter_prefixes:
                                 if prefix.endswith('/'):
-                                    # Prefix match (e.g., "Europe/")
                                     if tz_id.startswith(prefix):
                                         filtered_features.append(feature)
                                         break
                                 else:
-                                    # Exact or sub-timezone match
                                     if tz_id == prefix or tz_id.startswith(prefix + '/'):
                                         filtered_features.append(feature)
                                         break
@@ -172,13 +231,30 @@ class TimezoneTrackerCoordinator:
                         data['features'] = filtered_features
                         _LOGGER.info(f"Filtered timezones: {original_count} -> {len(filtered_features)} (region: {self.region_filter})")
                     
-                    # Save to destination
                     with open(self.timezone_data_path, 'w') as f:
                         json.dump(data, f)
                     
-                    return len(data.get('features', []))
-
+                    feature_count = len(data.get('features', []))
+                    
+                    # Free memory
+                    del data
+                
+                # Clean up temp files
+                try:
+                    os.remove(extracted_path)
+                except Exception:
+                    pass
+                    
+                return feature_count
+            
             feature_count = await self.hass.async_add_executor_job(extract_filter_and_save)
+            
+            # Clean up downloaded zip
+            try:
+                os.remove(zip_path)
+            except Exception:
+                pass
+                
             _LOGGER.info(f"Saved timezone data with {feature_count} boundaries to {self.timezone_data_path}")
             return True
 
@@ -187,7 +263,7 @@ class TimezoneTrackerCoordinator:
             return False
 
     async def async_load_timezone_data(self) -> bool:
-        """Load timezone boundary polygons from GeoJSON file."""
+        """Load timezone boundary polygons from GeoJSON file with memory-efficient streaming."""
         if not SHAPELY_AVAILABLE:
             _LOGGER.error("Cannot load timezone data - shapely not available")
             return False
@@ -199,31 +275,77 @@ class TimezoneTrackerCoordinator:
                 return False
 
         def load_data():
-            """Load data in executor."""
+            """Load data in executor with streaming JSON if available."""
             polygons = {}
-            with open(self.timezone_data_path, 'r') as f:
-                data = json.load(f)
+            
+            try:
+                # Try to use ijson for memory-efficient streaming parse
+                import ijson
+                _LOGGER.debug("Using ijson for memory-efficient loading")
+                
+                with open(self.timezone_data_path, 'rb') as f:
+                    for feature in ijson.items(f, 'features.item'):
+                        tz_id = feature.get('properties', {}).get('tzid')
+                        if tz_id and feature.get('geometry'):
+                            try:
+                                geom = shape(feature['geometry'])
+                                if geom.is_valid:
+                                    polygons[tz_id] = geom
+                                else:
+                                    geom = geom.buffer(0)
+                                    if geom.is_valid:
+                                        polygons[tz_id] = geom
+                            except Exception as e:
+                                _LOGGER.warning(f"Failed to load geometry for {tz_id}: {e}")
+                        
+                        # Allow feature dict to be garbage collected
+                        del feature
+                        
+            except ImportError:
+                # Fallback to standard json
+                _LOGGER.debug("ijson not available, using standard JSON loading")
+                
+                with open(self.timezone_data_path, 'r') as f:
+                    data = json.load(f)
 
-            for feature in data.get('features', []):
-                tz_id = feature.get('properties', {}).get('tzid')
-                if tz_id and feature.get('geometry'):
-                    try:
-                        geom = shape(feature['geometry'])
-                        if geom.is_valid:
-                            polygons[tz_id] = geom
-                        else:
-                            geom = geom.buffer(0)
+                for feature in data.get('features', []):
+                    tz_id = feature.get('properties', {}).get('tzid')
+                    if tz_id and feature.get('geometry'):
+                        try:
+                            geom = shape(feature['geometry'])
                             if geom.is_valid:
                                 polygons[tz_id] = geom
-                    except Exception as e:
-                        _LOGGER.warning(f"Failed to load geometry for {tz_id}: {e}")
+                            else:
+                                geom = geom.buffer(0)
+                                if geom.is_valid:
+                                    polygons[tz_id] = geom
+                        except Exception as e:
+                            _LOGGER.warning(f"Failed to load geometry for {tz_id}: {e}")
+                
+                # Free memory from the raw JSON data
+                del data
 
             return polygons
+
+        def build_spatial_index(polygons):
+            """Build STRtree spatial index for O(log N) queries."""
+            tz_index = list(polygons.keys())
+            geometries = [polygons[tz_id] for tz_id in tz_index]
+            spatial_tree = STRtree(geometries)
+            return tz_index, spatial_tree
 
         try:
             _LOGGER.info(f"Loading timezone data from {self.timezone_data_path}")
             self._tz_polygons = await self.hass.async_add_executor_job(load_data)
             _LOGGER.info(f"Loaded {len(self._tz_polygons)} timezone boundaries")
+            
+            # Build spatial index
+            _LOGGER.debug("Building spatial index...")
+            self._tz_index, self._spatial_tree = await self.hass.async_add_executor_job(
+                build_spatial_index, self._tz_polygons
+            )
+            _LOGGER.info(f"Built spatial index for {len(self._tz_index)} timezones")
+            
             return True
         except Exception as e:
             _LOGGER.error(f"Failed to load timezone data: {e}")
@@ -385,66 +507,68 @@ class TimezoneTrackerCoordinator:
         )
 
     def _find_timezone_at_point(self, lat: float, lon: float) -> str | None:
-        """Find which timezone polygon contains the given point."""
-        if not self._tz_polygons:
+        """Find which timezone polygon contains the given point using spatial index."""
+        if not self._tz_polygons or not self._spatial_tree:
             return None
 
         point = Point(lon, lat)
 
-        for tz_id, polygon in self._tz_polygons.items():
+        # Use STRtree.query to find candidate polygons that might contain the point
+        # This is O(log N) instead of O(N)
+        candidate_indices = self._spatial_tree.query(point)
+        
+        for idx in candidate_indices:
+            tz_id = self._tz_index[idx]
+            polygon = self._tz_polygons[tz_id]
             try:
                 if polygon.contains(point):
                     return tz_id
             except Exception:
                 continue
 
-        # If no polygon contains the point, find the nearest one
-        min_dist = float('inf')
-        nearest_tz = None
-
-        for tz_id, polygon in self._tz_polygons.items():
-            try:
-                dist = polygon.distance(point)
-                if dist < min_dist:
-                    min_dist = dist
-                    nearest_tz = tz_id
-            except Exception:
-                continue
-
-        return nearest_tz
+        # If no polygon contains the point, find the nearest one using spatial index
+        # query_nearest returns indices of nearest geometries
+        try:
+            nearest_idx = self._spatial_tree.nearest(point)
+            if nearest_idx is not None:
+                return self._tz_index[nearest_idx]
+        except Exception:
+            pass
+        
+        return None
 
     def _calculate_distance_to_boundary(self, lat: float, lon: float, tz_id: str) -> tuple[float, str | None]:
         """
         Calculate distance from point to nearest timezone boundary that leads to a different timezone.
         
+        Uses STRtree spatial index for O(log N) nearest neighbor queries.
         Ignores coastal boundaries (edges where the other side is ocean/no timezone).
         
         Returns: (distance_in_miles, nearest_timezone_id)
         """
-        if not self._tz_polygons or tz_id not in self._tz_polygons:
+        if not self._tz_polygons or not self._spatial_tree or tz_id not in self._tz_polygons:
             return float('inf'), None
 
         point = Point(lon, lat)
 
         try:
-            # Find distances to all other timezone polygons
-            # The nearest one that's different from current is the real boundary
+            # Use query_nearest to get the k nearest polygons, then filter out current timezone
+            # We query for more than we need since one of them will be our current timezone
+            k_nearest = min(10, len(self._tz_index))
+            nearest_indices = self._spatial_tree.query_nearest(point, k=k_nearest, return_distance=False)
+            
             min_distance = float('inf')
             nearest_tz = None
             
-            for other_tz_id, other_polygon in self._tz_polygons.items():
+            for idx in nearest_indices:
+                other_tz_id = self._tz_index[idx]
                 if other_tz_id == tz_id:
                     continue
                 
                 try:
-                    # Get distance from current point to the other timezone's polygon
+                    other_polygon = self._tz_polygons[other_tz_id]
                     nearest_pt = nearest_points(point, other_polygon)[1]
-                    
-                    if self._geod:
-                        _, _, dist_meters = self._geod.inv(lon, lat, nearest_pt.x, nearest_pt.y)
-                        dist_miles = dist_meters / 1609.344
-                    else:
-                        dist_miles = self._haversine_distance(lat, lon, nearest_pt.y, nearest_pt.x)
+                    dist_miles = self._haversine_distance(lat, lon, nearest_pt.y, nearest_pt.x)
                     
                     if dist_miles < min_distance:
                         min_distance = dist_miles
@@ -506,35 +630,30 @@ class TimezoneTrackerCoordinator:
             return float('inf')
 
     def _project_point(self, lat: float, lon: float, heading: float, distance_miles: float) -> tuple[float, float]:
-        """Project a point along a heading for a given distance."""
-        if self._geod:
-            new_lon, new_lat, _ = self._geod.fwd(lon, lat, heading, distance_miles * 1609.344)
-            return new_lat, new_lon
-        else:
-            dist_km = distance_miles * 1.60934
-            heading_rad = math.radians(heading)
-            R = 6371
+        """Project a point along a heading for a given distance using spherical Earth model."""
+        dist_km = distance_miles * 1.60934
+        heading_rad = math.radians(heading)
+        R = 6371  # Earth radius in km
 
-            lat_rad = math.radians(lat)
-            new_lat_rad = math.asin(
-                math.sin(lat_rad) * math.cos(dist_km / R) +
-                math.cos(lat_rad) * math.sin(dist_km / R) * math.cos(heading_rad)
-            )
-            new_lon_rad = math.radians(lon) + math.atan2(
-                math.sin(heading_rad) * math.sin(dist_km / R) * math.cos(lat_rad),
-                math.cos(dist_km / R) - math.sin(lat_rad) * math.sin(new_lat_rad)
-            )
-            return math.degrees(new_lat_rad), math.degrees(new_lon_rad)
+        lat_rad = math.radians(lat)
+        new_lat_rad = math.asin(
+            math.sin(lat_rad) * math.cos(dist_km / R) +
+            math.cos(lat_rad) * math.sin(dist_km / R) * math.cos(heading_rad)
+        )
+        new_lon_rad = math.radians(lon) + math.atan2(
+            math.sin(heading_rad) * math.sin(dist_km / R) * math.cos(lat_rad),
+            math.cos(dist_km / R) - math.sin(lat_rad) * math.sin(new_lat_rad)
+        )
+        return math.degrees(new_lat_rad), math.degrees(new_lon_rad)
 
     def _haversine_distance(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        """Calculate distance between two points in miles."""
-        R = 3959
+        """Calculate distance between two points in miles using Haversine formula."""
         lat1_rad, lat2_rad = math.radians(lat1), math.radians(lat2)
         delta_lat = math.radians(lat2 - lat1)
         delta_lon = math.radians(lon2 - lon1)
 
         a = math.sin(delta_lat/2)**2 + math.cos(lat1_rad)*math.cos(lat2_rad)*math.sin(delta_lon/2)**2
-        return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+        return EARTH_RADIUS_MILES * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
     def _calculate_check_interval(self, distance: float, speed: float) -> int:
         """Calculate polling interval based on distance and speed."""

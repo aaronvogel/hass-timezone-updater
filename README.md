@@ -93,9 +93,12 @@ After setup, you can adjust options by clicking **Configure** on the integration
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| Region | North America | Geographic region for timezone data (changing triggers automatic re-download) |
 | Min Interval | 30s | Minimum time between checks (when very close to boundary) |
 | Max Interval | 3600s | Maximum time between checks (when far from any boundary) |
 | Hysteresis Count | 2 | Consecutive readings in new timezone required before switching |
+
+**Changing the region:** When you select a new region, the integration immediately starts downloading the new dataset in the background. You'll see log entries showing the download progress. The integration continues working with cached data until the new download completes.
 
 ## Sensors
 
@@ -173,7 +176,7 @@ Check your internet connection. The integration downloads data from GitHub on fi
 The dependencies should install automatically. If not, try:
 ```bash
 # For HA Container:
-docker exec -it homeassistant pip install shapely pyproj
+docker exec -it homeassistant pip install shapely ijson
 
 # Then restart Home Assistant
 ```
@@ -184,17 +187,30 @@ docker exec -it homeassistant pip install shapely pyproj
 3. Try the `timezone_tracker.force_update` service
 4. Increase the hysteresis count if you're getting flip-flopping at boundaries
 
-### High memory usage
-Select a smaller region during setup. If you've already set up with "All Timezones", you can:
-1. Delete the integration
-2. Delete `/config/timezone_data/timezones.geojson`
-3. Re-add the integration with a smaller region selected
+### High memory usage / Out of Memory on Raspberry Pi
+The "All Timezones" region requires ~500MB+ of RAM and is **not recommended for Raspberry Pi** or other low-memory devices.
+
+**Estimated RAM usage by region:**
+| Region | Disk Size | RAM Usage |
+|--------|-----------|-----------|
+| US only | ~3MB | ~50MB |
+| Europe | ~5MB | ~80MB |
+| US & Canada | ~6MB | ~90MB |
+| North America | ~8MB | ~100MB |
+| All Americas | ~15MB | ~150MB |
+| All Timezones | ~120MB | ~500MB+ |
+
+If you're experiencing OOM (Out of Memory) crashes:
+1. Go to **Settings** → **Devices & Services**
+2. Find **Timezone Tracker** and click **Configure**
+3. Select a smaller region (e.g., "North America" instead of "All")
+4. Click **Submit** - the data will be re-downloaded with the new filter
 
 ### Slow first startup
 The first run downloads and processes boundary data. The time depends on your selected region:
 - US only: ~3MB, fast
 - North America: ~8MB, quick  
-- All timezones: ~120MB, slower
+- All timezones: ~120MB, slower (and high memory usage!)
 
 Subsequent startups load from the cached file and are much faster.
 
@@ -205,18 +221,32 @@ You can change the region in the integration options:
 3. Select a new region from the dropdown
 4. Click **Submit**
 
-The cached data will be deleted automatically and re-downloaded with the new region filter.
+The new timezone data will begin downloading immediately in the background. Check the logs to monitor progress. The integration continues working until the download completes and the new data is loaded.
 
 Alternatively, you can call the `timezone_tracker.download_data` service to force a re-download with the current region settings.
+
+## Technical Details
+
+### Data Storage
+Timezone boundary data is stored in `.storage/timezone_tracker/` within your Home Assistant config directory. This location:
+- Keeps data out of your main config directory
+- Is typically excluded from Home Assistant backups (avoiding backup bloat)
+- Persists across container restarts
+
+### Performance
+- **Spatial indexing**: Uses R-tree (STRtree) for O(log N) polygon queries instead of O(N) iteration
+- **Streaming JSON**: Uses `ijson` for memory-efficient parsing of large GeoJSON files
+- **Streaming downloads**: Downloads are streamed to disk rather than loaded into RAM
+
+### Dependencies
+- `shapely>=2.0.0` - Polygon geometry operations
+- `ijson>=3.0.0` - Memory-efficient JSON streaming (optional but recommended)
 
 ## Data Source
 
 Timezone boundaries are from [timezone-boundary-builder](https://github.com/evansiroky/timezone-boundary-builder), which sources data from OpenStreetMap. The data is released regularly when timezone boundaries change.
 
-To update your boundary data:
-```bash
-python setup_timezone_data.py --filter-regions us,ca,mx
-```
+To update to the latest boundary data, call the `timezone_tracker.download_data` service or change the region in the integration options.
 
 ## License
 

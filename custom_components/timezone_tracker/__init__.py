@@ -20,7 +20,6 @@ from homeassistant.helpers.event import async_track_time_interval
 from .const import (
     DOMAIN,
     CONF_GPS_ENTITY,
-    CONF_TIMEZONE_DATA_PATH,
     CONF_MIN_INTERVAL,
     CONF_MAX_INTERVAL,
     CONF_HYSTERESIS_COUNT,
@@ -28,8 +27,9 @@ from .const import (
     DEFAULT_MIN_INTERVAL,
     DEFAULT_MAX_INTERVAL,
     DEFAULT_HYSTERESIS_COUNT,
-    DEFAULT_TIMEZONE_DATA_PATH,
     DEFAULT_REGION_FILTER,
+    STORAGE_DIR,
+    STORAGE_FILENAME,
 )
 from .coordinator import TimezoneTrackerCoordinator
 
@@ -38,13 +38,18 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 
+def get_storage_path(hass: HomeAssistant) -> str:
+    """Get the path for storing timezone data in .storage directory."""
+    return hass.config.path(".storage", STORAGE_DIR, STORAGE_FILENAME)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Timezone Tracker from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
     # Get configuration
     gps_entity = entry.data[CONF_GPS_ENTITY]
-    timezone_data_path = entry.data.get(CONF_TIMEZONE_DATA_PATH, DEFAULT_TIMEZONE_DATA_PATH)
+    timezone_data_path = get_storage_path(hass)
     region_filter = entry.data.get(CONF_REGION_FILTER, DEFAULT_REGION_FILTER)
     min_interval = entry.options.get(CONF_MIN_INTERVAL, DEFAULT_MIN_INTERVAL)
     max_interval = entry.options.get(CONF_MAX_INTERVAL, DEFAULT_MAX_INTERVAL)
