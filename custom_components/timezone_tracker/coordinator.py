@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal
 import json
 import logging
 import math
@@ -198,9 +199,15 @@ class TimezoneTrackerCoordinator:
                     if filter_prefixes is not None:
                         _LOGGER.info(f"Filtered timezones: {original_count} -> {len(filtered_features)} (region: {self.region_filter})")
                     
-                    # Write filtered output
+                    # Write filtered output - use custom encoder for ijson's Decimal objects
+                    class DecimalEncoder(json.JSONEncoder):
+                        def default(self, obj):
+                            if isinstance(obj, Decimal):
+                                return float(obj)
+                            return super().default(obj)
+                    
                     with open(self.timezone_data_path, 'w') as f:
-                        json.dump({"type": "FeatureCollection", "features": filtered_features}, f)
+                        json.dump({"type": "FeatureCollection", "features": filtered_features}, f, cls=DecimalEncoder)
                     
                     feature_count = len(filtered_features)
                     
