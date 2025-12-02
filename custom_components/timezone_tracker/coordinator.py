@@ -113,9 +113,9 @@ class TimezoneTrackerCoordinator:
     async def _async_download_timezone_data(self) -> bool:
         """Download timezone boundary data from GitHub."""
         try:
-            # Ensure directory exists
+            # Ensure directory exists (in executor)
             data_dir = os.path.dirname(self.timezone_data_path)
-            os.makedirs(data_dir, exist_ok=True)
+            await self.hass.async_add_executor_job(os.makedirs, data_dir, True)
             
             zip_path = os.path.join(data_dir, "timezones_download.zip")
 
@@ -123,25 +123,24 @@ class TimezoneTrackerCoordinator:
             
             session = async_get_clientsession(self.hass)
             
-            # Stream download to disk
+            # Download to memory first (avoid blocking file I/O in event loop)
             async with session.get(TIMEZONE_DATA_URL) as response:
                 if response.status != 200:
                     _LOGGER.error(f"Failed to download timezone data: HTTP {response.status}")
                     return False
                 
-                total_size = 0
-                with open(zip_path, 'wb') as f:
-                    async for chunk in response.content.iter_chunked(65536):
-                        f.write(chunk)
-                        total_size += len(chunk)
-                
-                _LOGGER.info(f"Downloaded {total_size / 1024 / 1024:.1f} MB to disk")
+                zip_data = await response.read()
+                _LOGGER.info(f"Downloaded {len(zip_data) / 1024 / 1024:.1f} MB")
 
             # Get filter prefixes for selected region
             filter_prefixes = REGION_TIMEZONE_PREFIXES.get(self.region_filter)
 
-            # Extract and filter in executor
-            def extract_filter_and_save():
+            # Write zip, extract, filter, and save - all in executor to avoid blocking
+            def process_and_save():
+                # Write zip to disk
+                with open(zip_path, 'wb') as f:
+                    f.write(zip_data)
+                
                 _LOGGER.info("Extracting and filtering timezone data...")
                 
                 with zipfile.ZipFile(zip_path, 'r') as zf:
@@ -152,7 +151,7 @@ class TimezoneTrackerCoordinator:
                     
                     geojson_name = geojson_files[0]
                     
-                    # Load JSON directly from zip (standard json is fast enough for one-time use)
+                    # Load JSON directly from zip
                     with zf.open(geojson_name) as f:
                         data = json.load(f)
                 
@@ -184,18 +183,18 @@ class TimezoneTrackerCoordinator:
                 
                 feature_count = len(data.get('features', []))
                 
+                # Clean up zip file
+                try:
+                    os.remove(zip_path)
+                except Exception:
+                    pass
+                
                 # Free memory
                 del data
                     
                 return feature_count
             
-            feature_count = await self.hass.async_add_executor_job(extract_filter_and_save)
-            
-            # Clean up downloaded zip
-            try:
-                os.remove(zip_path)
-            except Exception:
-                pass
+            feature_count = await self.hass.async_add_executor_job(process_and_save)
                 
             _LOGGER.info(f"Saved {feature_count} timezone boundaries to {self.timezone_data_path}")
             return True
