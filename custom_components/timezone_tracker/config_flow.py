@@ -119,15 +119,11 @@ class TimezoneTrackerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         config_entry: config_entries.ConfigEntry,
     ) -> config_entries.OptionsFlow:
         """Create the options flow."""
-        return TimezoneTrackerOptionsFlow(config_entry)
+        return TimezoneTrackerOptionsFlow()
 
 
 class TimezoneTrackerOptionsFlow(config_entries.OptionsFlow):
     """Handle options flow for Timezone Tracker."""
-
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
