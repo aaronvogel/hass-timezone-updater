@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-from decimal import Decimal
 import json
 import logging
 import math
@@ -11,7 +10,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 import zipfile
-from io import BytesIO
 
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later
@@ -113,7 +111,7 @@ class TimezoneTrackerCoordinator:
             listener()
 
     async def _async_download_timezone_data(self) -> bool:
-        """Download timezone boundary data from GitHub with memory-efficient streaming."""
+        """Download timezone boundary data from GitHub."""
         try:
             # Ensure directory exists
             data_dir = os.path.dirname(self.timezone_data_path)
@@ -125,7 +123,7 @@ class TimezoneTrackerCoordinator:
             
             session = async_get_clientsession(self.hass)
             
-            # Stream download to disk instead of loading into RAM
+            # Stream download to disk
             async with session.get(TIMEZONE_DATA_URL) as response:
                 if response.status != 200:
                     _LOGGER.error(f"Failed to download timezone data: HTTP {response.status}")
@@ -133,7 +131,7 @@ class TimezoneTrackerCoordinator:
                 
                 total_size = 0
                 with open(zip_path, 'wb') as f:
-                    async for chunk in response.content.iter_chunked(8192):
+                    async for chunk in response.content.iter_chunked(65536):
                         f.write(chunk)
                         total_size += len(chunk)
                 
@@ -142,9 +140,9 @@ class TimezoneTrackerCoordinator:
             # Get filter prefixes for selected region
             filter_prefixes = REGION_TIMEZONE_PREFIXES.get(self.region_filter)
 
-            # Extract and filter in executor to avoid blocking
+            # Extract and filter in executor
             def extract_filter_and_save():
-                feature_count = 0
+                _LOGGER.info("Extracting and filtering timezone data...")
                 
                 with zipfile.ZipFile(zip_path, 'r') as zf:
                     # Find the geojson file
@@ -153,104 +151,41 @@ class TimezoneTrackerCoordinator:
                         raise ValueError("No GeoJSON file found in zip archive")
                     
                     geojson_name = geojson_files[0]
-                    _LOGGER.info(f"Processing {geojson_name}")
                     
-                    # Extract to temp file for streaming parse
-                    extracted_path = os.path.join(data_dir, "timezones_temp.geojson")
-                    with zf.open(geojson_name) as src, open(extracted_path, 'wb') as dst:
-                        # Stream extraction in chunks
-                        while True:
-                            chunk = src.read(65536)
-                            if not chunk:
-                                break
-                            dst.write(chunk)
-                
-                # Now process the extracted file with streaming JSON if available
-                extracted_path = os.path.join(data_dir, "timezones_temp.geojson")
-                
-                try:
-                    # Try to use ijson for memory-efficient parsing
-                    import ijson
-                    _LOGGER.debug("Using ijson for memory-efficient parsing")
-                    
-                    filtered_features = []
-                    original_count = 0
-                    
-                    with open(extracted_path, 'rb') as f:
-                        for feature in ijson.items(f, 'features.item'):
-                            original_count += 1
-                            tz_id = feature.get('properties', {}).get('tzid', '')
-                            
-                            # Apply filter
-                            if filter_prefixes is None:
-                                # No filter - include all
-                                filtered_features.append(feature)
-                            else:
-                                for prefix in filter_prefixes:
-                                    if prefix.endswith('/'):
-                                        if tz_id.startswith(prefix):
-                                            filtered_features.append(feature)
-                                            break
-                                    else:
-                                        if tz_id == prefix or tz_id.startswith(prefix + '/'):
-                                            filtered_features.append(feature)
-                                            break
-                    
-                    if filter_prefixes is not None:
-                        _LOGGER.info(f"Filtered timezones: {original_count} -> {len(filtered_features)} (region: {self.region_filter})")
-                    
-                    # Write filtered output - use custom encoder for ijson's Decimal objects
-                    class DecimalEncoder(json.JSONEncoder):
-                        def default(self, obj):
-                            if isinstance(obj, Decimal):
-                                return float(obj)
-                            return super().default(obj)
-                    
-                    with open(self.timezone_data_path, 'w') as f:
-                        json.dump({"type": "FeatureCollection", "features": filtered_features}, f, cls=DecimalEncoder)
-                    
-                    feature_count = len(filtered_features)
-                    
-                except ImportError:
-                    # Fallback to standard json if ijson not available
-                    _LOGGER.debug("ijson not available, using standard JSON parsing")
-                    
-                    with open(extracted_path, 'r') as f:
+                    # Load JSON directly from zip (standard json is fast enough for one-time use)
+                    with zf.open(geojson_name) as f:
                         data = json.load(f)
-                    
-                    original_count = len(data.get('features', []))
-                    
-                    if filter_prefixes is not None:
-                        filtered_features = []
-                        for feature in data.get('features', []):
-                            tz_id = feature.get('properties', {}).get('tzid', '')
-                            
-                            for prefix in filter_prefixes:
-                                if prefix.endswith('/'):
-                                    if tz_id.startswith(prefix):
-                                        filtered_features.append(feature)
-                                        break
-                                else:
-                                    if tz_id == prefix or tz_id.startswith(prefix + '/'):
-                                        filtered_features.append(feature)
-                                        break
-                        
-                        data['features'] = filtered_features
-                        _LOGGER.info(f"Filtered timezones: {original_count} -> {len(filtered_features)} (region: {self.region_filter})")
-                    
-                    with open(self.timezone_data_path, 'w') as f:
-                        json.dump(data, f)
-                    
-                    feature_count = len(data.get('features', []))
-                    
-                    # Free memory
-                    del data
                 
-                # Clean up temp files
-                try:
-                    os.remove(extracted_path)
-                except Exception:
-                    pass
+                original_count = len(data.get('features', []))
+                _LOGGER.info(f"Loaded {original_count} timezone features")
+                
+                # Apply region filter if specified
+                if filter_prefixes is not None:
+                    filtered_features = []
+                    for feature in data.get('features', []):
+                        tz_id = feature.get('properties', {}).get('tzid', '')
+                        
+                        for prefix in filter_prefixes:
+                            if prefix.endswith('/'):
+                                if tz_id.startswith(prefix):
+                                    filtered_features.append(feature)
+                                    break
+                            else:
+                                if tz_id == prefix or tz_id.startswith(prefix + '/'):
+                                    filtered_features.append(feature)
+                                    break
+                    
+                    data['features'] = filtered_features
+                    _LOGGER.info(f"Filtered: {original_count} -> {len(filtered_features)} timezones (region: {self.region_filter})")
+                
+                # Save filtered data
+                with open(self.timezone_data_path, 'w') as f:
+                    json.dump(data, f)
+                
+                feature_count = len(data.get('features', []))
+                
+                # Free memory
+                del data
                     
                 return feature_count
             
@@ -262,7 +197,7 @@ class TimezoneTrackerCoordinator:
             except Exception:
                 pass
                 
-            _LOGGER.info(f"Saved timezone data with {feature_count} boundaries to {self.timezone_data_path}")
+            _LOGGER.info(f"Saved {feature_count} timezone boundaries to {self.timezone_data_path}")
             return True
 
         except Exception as e:

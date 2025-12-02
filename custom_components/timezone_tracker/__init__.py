@@ -66,15 +66,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hysteresis_count=hysteresis_count,
     )
 
-    # Load timezone data
-    if not await coordinator.async_load_timezone_data():
-        _LOGGER.error("Failed to load timezone boundary data")
-        return False
-
-    # Store coordinator
+    # Store coordinator first so it's available for services
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
-    # Start the coordinator
+    # Try to load timezone data - if file exists locally, this is fast
+    # If download is needed, do it in background to avoid setup timeout
+    if os.path.exists(timezone_data_path):
+        # File exists - try to load it (fast operation)
+        if not await coordinator.async_load_timezone_data():
+            _LOGGER.warning("Failed to load timezone data, will retry in background")
+    else:
+        # File doesn't exist - start background download
+        _LOGGER.info("Timezone data not found, starting background download...")
+        
+        async def background_download():
+            """Download and load timezone data in background."""
+            try:
+                if await coordinator.async_load_timezone_data():
+                    _LOGGER.info("Background timezone data download complete")
+                    # Trigger an update now that we have data
+                    await coordinator.async_force_update()
+                else:
+                    _LOGGER.error("Background timezone data download failed")
+            except Exception as e:
+                _LOGGER.error(f"Background download error: {e}")
+        
+        hass.async_create_task(background_download())
+
+    # Start the coordinator (will wait for data if not loaded yet)
     await coordinator.async_start()
 
     # Set up platforms
