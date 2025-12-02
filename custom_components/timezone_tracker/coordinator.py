@@ -305,9 +305,6 @@ class TimezoneTrackerCoordinator:
                             except Exception as e:
                                 _LOGGER.warning(f"Failed to load geometry for {tz_id}: {e}")
                         
-                        # Allow feature dict to be garbage collected
-                        del feature
-                        
             except ImportError:
                 # Fallback to standard json
                 _LOGGER.debug("ijson not available, using standard JSON loading")
@@ -344,6 +341,11 @@ class TimezoneTrackerCoordinator:
         try:
             _LOGGER.info(f"Loading timezone data from {self.timezone_data_path}")
             self._tz_polygons = await self.hass.async_add_executor_job(load_data)
+            
+            # Check if we got any data - if not, file might be corrupt
+            if not self._tz_polygons:
+                raise ValueError("No timezone polygons loaded - file may be corrupt")
+            
             _LOGGER.info(f"Loaded {len(self._tz_polygons)} timezone boundaries")
             
             # Build spatial index
@@ -356,6 +358,25 @@ class TimezoneTrackerCoordinator:
             return True
         except Exception as e:
             _LOGGER.error(f"Failed to load timezone data: {e}")
+            
+            # If file exists but failed to load, it's likely corrupt - delete and retry
+            if os.path.exists(self.timezone_data_path):
+                _LOGGER.warning("Deleting potentially corrupt timezone data file and re-downloading...")
+                try:
+                    os.remove(self.timezone_data_path)
+                    # Try downloading again
+                    if await self._async_download_timezone_data():
+                        # Retry loading
+                        self._tz_polygons = await self.hass.async_add_executor_job(load_data)
+                        if self._tz_polygons:
+                            self._tz_index, self._spatial_tree = await self.hass.async_add_executor_job(
+                                build_spatial_index, self._tz_polygons
+                            )
+                            _LOGGER.info(f"Successfully loaded {len(self._tz_polygons)} timezone boundaries after re-download")
+                            return True
+                except Exception as retry_error:
+                    _LOGGER.error(f"Retry also failed: {retry_error}")
+            
             return False
 
     async def async_start(self) -> None:
