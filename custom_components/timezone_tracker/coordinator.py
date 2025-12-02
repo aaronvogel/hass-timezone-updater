@@ -489,12 +489,27 @@ class TimezoneTrackerCoordinator:
             except Exception:
                 continue
 
-        # If no polygon contains the point, find the nearest one using spatial index
-        # query_nearest returns indices of nearest geometries
+        # If no polygon contains the point, find the nearest one
+        # Use a small buffer to query nearby polygons
         try:
-            nearest_idx = self._spatial_tree.nearest(point)
-            if nearest_idx is not None:
-                return self._tz_index[nearest_idx]
+            search_buffer = point.buffer(1.0)  # ~1 degree buffer
+            nearby_indices = self._spatial_tree.query(search_buffer)
+            
+            min_dist = float('inf')
+            nearest_tz = None
+            
+            for idx in nearby_indices:
+                tz_id = self._tz_index[idx]
+                polygon = self._tz_polygons[tz_id]
+                try:
+                    dist = polygon.distance(point)
+                    if dist < min_dist:
+                        min_dist = dist
+                        nearest_tz = tz_id
+                except Exception:
+                    continue
+            
+            return nearest_tz
         except Exception:
             pass
         
@@ -515,15 +530,16 @@ class TimezoneTrackerCoordinator:
         point = Point(lon, lat)
 
         try:
-            # Use query_nearest to get the k nearest polygons, then filter out current timezone
-            # We query for more than we need since one of them will be our current timezone
-            k_nearest = min(10, len(self._tz_index))
-            nearest_indices = self._spatial_tree.query_nearest(point, k=k_nearest, return_distance=False)
+            # Use spatial index to find nearby polygons
+            # query_nearest API varies by Shapely version, so use query with a buffer instead
+            # Create a search buffer around the point (roughly 500 miles in degrees)
+            search_buffer = point.buffer(7.0)  # ~7 degrees ≈ 480 miles at mid-latitudes
+            candidate_indices = self._spatial_tree.query(search_buffer)
             
             min_distance = float('inf')
             nearest_tz = None
             
-            for idx in nearest_indices:
+            for idx in candidate_indices:
                 other_tz_id = self._tz_index[idx]
                 if other_tz_id == tz_id:
                     continue
